@@ -1,0 +1,13 @@
+# The assembled installer is built from the tracked parts (bash build.sh).
+dist/
+
+# macOS and editor leftovers
+.DS_Store
+*.swp
+*~
+
+# Build leftovers if you ever compile by hand
+*.o
+*.icns
+*.iconset/
+StretchReminder.app/

@@ -47,6 +47,12 @@ enum Config {
 
     /// Sitting time before a reminder.
     static var interval: TimeInterval { number("intervalMinutes", default: 30) * 60 }
+    /// The choices offered in the menu (minutes between reminders).
+    static let intervalChoices: [Int] = [15, 20, 30, 45, 60, 90]
+    /// The choices offered in the menu (how long the reminder stays on screen).
+    static let breakChoices: [(seconds: Int, label: String)] = [
+        (15, "15 seconds"), (30, "30 seconds"), (60, "1 minute"), (120, "2 minutes"), (300, "5 minutes")
+    ]
     /// How long the screen stays up before it closes by itself.
     static var breakSeconds: TimeInterval { number("breakSeconds", default: 60) }
     /// How long before the "done" button / Esc key starts working.
@@ -566,6 +572,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var loginMenuItem: NSMenuItem?
     private var lockOffMenuItem: NSMenuItem?
     private var countdownMenuItem: NSMenuItem?
+    private var intervalParentItem: NSMenuItem?
+    private var intervalChoiceItems: [NSMenuItem] = []
+    private var intervalOtherItem: NSMenuItem?
+    private var breakParentItem: NSMenuItem?
+    private var breakChoiceItems: [NSMenuItem] = []
 
     init(testMode: Bool) {
         self.testMode = testMode
@@ -644,9 +655,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pauseOpenItem = addMenuItem(menu, "Turn off", #selector(pauseIndefinitely))
         pauseHourItem = addMenuItem(menu, "Turn off for 1 hour", #selector(pauseOneHour))
         addMenuItem(menu, "Show reminder now", #selector(showNow))
-        addMenuItem(menu, "Change reminder message…", #selector(changeMessage))
 
         menu.addItem(NSMenuItem.separator())
+
+        // Settings: how often.
+        let intervalParent = NSMenuItem(title: "Remind me every", action: nil, keyEquivalent: "")
+        let intervalMenu = NSMenu(title: "Remind me every")
+        intervalMenu.autoenablesItems = false
+        for minutes in Config.intervalChoices {
+            let choice = NSMenuItem(title: "\(minutes) minutes", action: #selector(chooseInterval(_:)), keyEquivalent: "")
+            choice.target = self
+            choice.tag = minutes
+            intervalMenu.addItem(choice)
+            intervalChoiceItems.append(choice)
+        }
+        intervalMenu.addItem(NSMenuItem.separator())
+        let other = NSMenuItem(title: "Other…", action: #selector(chooseOtherInterval), keyEquivalent: "")
+        other.target = self
+        intervalMenu.addItem(other)
+        intervalOtherItem = other
+        intervalParent.submenu = intervalMenu
+        menu.addItem(intervalParent)
+        intervalParentItem = intervalParent
+
+        // Settings: how long the reminder stays up.
+        let breakParent = NSMenuItem(title: "Reminder stays on screen", action: nil, keyEquivalent: "")
+        let breakMenu = NSMenu(title: "Reminder stays on screen")
+        breakMenu.autoenablesItems = false
+        for entry in Config.breakChoices {
+            let choice = NSMenuItem(title: entry.label, action: #selector(chooseBreak(_:)), keyEquivalent: "")
+            choice.target = self
+            choice.tag = entry.seconds
+            breakMenu.addItem(choice)
+            breakChoiceItems.append(choice)
+        }
+        breakParent.submenu = breakMenu
+        menu.addItem(breakParent)
+        breakParentItem = breakParent
+
+        addMenuItem(menu, "Change reminder message…", #selector(changeMessage))
         loginMenuItem = addMenuItem(menu, "Start at login", #selector(toggleStartAtLogin))
         lockOffMenuItem = addMenuItem(menu, "Turn off when the Mac locks or sleeps", #selector(toggleTurnOffOnLock))
         countdownMenuItem = addMenuItem(menu, "Show countdown in menu bar", #selector(toggleCountdownInMenuBar))
@@ -743,6 +790,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lockOffMenuItem?.state = Config.turnOffOnLock ? NSControl.StateValue.on : NSControl.StateValue.off
         countdownMenuItem?.state = Config.showCountdownInMenuBar ? NSControl.StateValue.on : NSControl.StateValue.off
 
+        let intervalMinutes = Config.interval / 60
+        let intervalText = minutesText(intervalMinutes)
+        intervalParentItem?.title = "Remind me every: " + intervalText
+        var intervalIsListed = false
+        for choice in intervalChoiceItems {
+            let isCurrent = Double(choice.tag) == intervalMinutes
+            if isCurrent { intervalIsListed = true }
+            choice.state = isCurrent ? NSControl.StateValue.on : NSControl.StateValue.off
+        }
+        intervalOtherItem?.title = intervalIsListed ? "Other…" : "Other… (" + intervalText + ")"
+        intervalOtherItem?.state = intervalIsListed ? NSControl.StateValue.off : NSControl.StateValue.on
+
+        let breakNow = Int(Config.breakSeconds.rounded())
+        var breakText = "\(breakNow) seconds"
+        for choice in breakChoiceItems {
+            let isCurrent = choice.tag == breakNow
+            if isCurrent { breakText = choice.title }
+            choice.state = isCurrent ? NSControl.StateValue.on : NSControl.StateValue.off
+        }
+        breakParentItem?.title = "Reminder stays on screen: " + breakText
+
         if checkFocus {
             var blocked = false
             if case .unknown = currentFocus() { blocked = true }
@@ -829,6 +897,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         editItem.submenu = edit
         mainMenu.addItem(editItem)
         NSApp.mainMenu = mainMenu
+    }
+
+    private func minutesText(_ minutes: Double) -> String {
+        if minutes == minutes.rounded() {
+            let whole = Int(minutes)
+            return whole == 1 ? "1 minute" : "\(whole) minutes"
+        }
+        return String(format: "%.1f minutes", minutes)
+    }
+
+    /// Saves the new period and starts counting again from now.
+    private func setInterval(minutes: Double) {
+        UserDefaults.standard.set(minutes, forKey: "intervalMinutes")
+        sitting = 0
+        nextEvaluation = Date.distantPast
+        lastPostponeReason = ""
+        note("Period changed: a reminder every " + minutesText(minutes) + ".")
+        refreshStatusItem(checkFocus: false)
+    }
+
+    @objc private func chooseInterval(_ sender: NSMenuItem) {
+        setInterval(minutes: Double(sender.tag))
+    }
+
+    @objc private func chooseOtherInterval() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Remind me every…"
+        alert.informativeText = "Number of minutes between reminders (1 to 240)."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        field.stringValue = String(Int((Config.interval / 60).rounded()))
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        var value = Double(text)
+        if value == nil {
+            // Arabic digits, e.g. ٤٥
+            let formatter = NumberFormatter()
+            formatter.locale = Locale(identifier: "ar")
+            value = formatter.number(from: text)?.doubleValue
+        }
+        if let minutes = value, minutes >= 1, minutes <= 240 {
+            setInterval(minutes: minutes)
+            return
+        }
+        let problem = NSAlert()
+        problem.messageText = "That is not a valid number of minutes"
+        problem.informativeText = "Enter a number between 1 and 240. Nothing was changed."
+        problem.addButton(withTitle: "OK")
+        _ = problem.runModal()
+    }
+
+    @objc private func chooseBreak(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(Double(sender.tag), forKey: "breakSeconds")
+        note("Reminder now stays on screen for \(sender.tag) seconds.")
+        refreshStatusItem(checkFocus: false)
     }
 
     @objc private func changeMessage() {
