@@ -52,8 +52,14 @@ enum Config {
     /// How long before the "done" button / Esc key starts working.
     static var dismissAfter: TimeInterval { number("dismissAfterSeconds", default: 5, allowZero: true) }
     /// The big message.
+    static let defaultMessage = "انت قاعد بقالك كتير قوم حرك جسمك"
     static var message: String {
-        UserDefaults.standard.string(forKey: "message") ?? "انت قاعد بقالك كتير قوم حرك جسمك"
+        let saved = UserDefaults.standard.string(forKey: "message") ?? ""
+        return saved.isEmpty ? defaultMessage : saved
+    }
+    /// The owner shown in the About window (written into the app by the installer).
+    static var owner: String {
+        return Bundle.main.object(forInfoDictionaryKey: "StretchReminderOwner") as? String ?? ""
     }
     /// Also treat a Focus *schedule* window as "Focus on".
     static var checkFocusSchedules: Bool {
@@ -562,6 +568,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self, selector: #selector(screenDidLock),
             name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
 
+        installEditMenu()
         setUpStatusItem()
 
         lastTick = Date()
@@ -604,6 +611,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pauseOpenItem = addMenuItem(menu, "Turn off", #selector(pauseIndefinitely))
         pauseHourItem = addMenuItem(menu, "Turn off for 1 hour", #selector(pauseOneHour))
         addMenuItem(menu, "Show reminder now", #selector(showNow))
+        addMenuItem(menu, "Change reminder message…", #selector(changeMessage))
 
         menu.addItem(NSMenuItem.separator())
         loginMenuItem = addMenuItem(menu, "Start at login", #selector(toggleStartAtLogin))
@@ -612,6 +620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addMenuItem(menu, "Open log", #selector(openLog))
 
         menu.addItem(NSMenuItem.separator())
+        addMenuItem(menu, "About StretchReminder", #selector(showAbout))
         addMenuItem(menu, "Uninstall StretchReminder…", #selector(uninstallApp))
         addMenuItem(menu, "Quit StretchReminder", #selector(quitApp))
 
@@ -771,6 +780,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             note("Could not turn on start at login.")
         }
         refreshStatusItem(checkFocus: false)
+    }
+
+    /// Without an Edit menu, Cmd-V / Cmd-C / Cmd-A do nothing in the message box.
+    private func installEditMenu() {
+        let mainMenu = NSMenu()
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        edit.addItem(NSMenuItem.separator())
+        edit.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        edit.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        edit.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        edit.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editItem.submenu = edit
+        mainMenu.addItem(editItem)
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func changeMessage() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Reminder message"
+        alert.informativeText = "This text is shown in big letters on the reminder screen."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
+        field.stringValue = Config.message
+        field.placeholderString = Config.defaultMessage
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Use the original")
+        alert.window.initialFirstResponder = field
+
+        let answer = alert.runModal()
+        if answer == .alertFirstButtonReturn {
+            let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.isEmpty || text == Config.defaultMessage {
+                UserDefaults.standard.removeObject(forKey: "message")
+            } else {
+                UserDefaults.standard.set(text, forKey: "message")
+            }
+            note("Reminder message changed.")
+        } else if answer == .alertThirdButtonReturn {
+            UserDefaults.standard.removeObject(forKey: "message")
+            note("Reminder message set back to the original.")
+        }
+    }
+
+    @objc private func showAbout() {
+        NSApp.activate(ignoringOtherApps: true)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        var lines = "Reminds you to get up and move."
+        if !Config.owner.isEmpty { lines += "\nOwner: " + Config.owner }
+        let credits = NSAttributedString(string: lines, attributes: [
+            NSAttributedString.Key.paragraphStyle: paragraph,
+            NSAttributedString.Key.font: NSFont.systemFont(ofSize: 12),
+            NSAttributedString.Key.foregroundColor: NSColor.labelColor
+        ])
+        NSApp.orderFrontStandardAboutPanel(options: [NSApplication.AboutPanelOptionKey.credits: credits])
     }
 
     @objc private func toggleCountdownInMenuBar() {
