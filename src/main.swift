@@ -15,10 +15,13 @@
 //   defaults write local.stretch-reminder dismissAfterSeconds -float 5
 //   defaults write local.stretch-reminder message -string "..."
 //   defaults write local.stretch-reminder checkFocusSchedules -bool false
+//   defaults write local.stretch-reminder turnOffOnLock -bool false
 //
-// It shows an icon in the menu bar (walking figure = on, pause = paused,
-// hourglass = a reminder is waiting for a call / Focus to end) with a menu to
-// pause, show a reminder now, switch "Start at login" on or off, and quit.
+// It shows an icon in the menu bar: green = on, gray = off. The menu turns it
+// on or off, shows a reminder now, switches "Start at login", and quits.
+// Like Caffeine, it switches itself OFF when the screen locks or the Mac
+// sleeps, and stays off until you turn it on again (this can be unticked in
+// the menu).
 //
 // Flags:  --test           show the screen once right now, then exit
 //         --status         print what the detectors currently see, then exit
@@ -55,6 +58,11 @@ enum Config {
     static var checkFocusSchedules: Bool {
         guard UserDefaults.standard.object(forKey: "checkFocusSchedules") != nil else { return true }
         return UserDefaults.standard.bool(forKey: "checkFocusSchedules")
+    }
+    /// Switch off when the screen locks or the Mac sleeps, until turned on again by hand.
+    static var turnOffOnLock: Bool {
+        guard UserDefaults.standard.object(forKey: "turnOffOnLock") != nil else { return true }
+        return UserDefaults.standard.bool(forKey: "turnOffOnLock")
     }
 
     /// Locked / display-off for at least this long counts as a real break.
@@ -440,6 +448,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pauseOpenItem: NSMenuItem?
     private var resumeItem: NSMenuItem?
     private var loginMenuItem: NSMenuItem?
+    private var lockOffMenuItem: NSMenuItem?
 
     init(testMode: Bool) {
         self.testMode = testMode
@@ -471,6 +480,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(systemWillSleep),
             name: NSWorkspace.willSleepNotification, object: nil)
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(screenDidLock),
+            name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
 
         setUpStatusItem()
 
@@ -504,13 +516,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         focusWarningItem = addMenuItem(menu, "Focus is not detected — open Full Disk Access…", #selector(openFullDiskAccess))
 
         menu.addItem(NSMenuItem.separator())
+        resumeItem = addMenuItem(menu, "Turn on", #selector(resumeReminders))
+        pauseOpenItem = addMenuItem(menu, "Turn off", #selector(pauseIndefinitely))
+        pauseHourItem = addMenuItem(menu, "Turn off for 1 hour", #selector(pauseOneHour))
         addMenuItem(menu, "Show reminder now", #selector(showNow))
-        pauseHourItem = addMenuItem(menu, "Pause for 1 hour", #selector(pauseOneHour))
-        pauseOpenItem = addMenuItem(menu, "Pause until I turn it back on", #selector(pauseIndefinitely))
-        resumeItem = addMenuItem(menu, "Resume reminders", #selector(resumeReminders))
 
         menu.addItem(NSMenuItem.separator())
         loginMenuItem = addMenuItem(menu, "Start at login", #selector(toggleStartAtLogin))
+        lockOffMenuItem = addMenuItem(menu, "Turn off when the Mac locks or sleeps", #selector(toggleTurnOffOnLock))
         addMenuItem(menu, "Open log", #selector(openLog))
 
         menu.addItem(NSMenuItem.separator())
@@ -522,33 +535,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshStatusItem(checkFocus: true)
     }
 
-    private func symbolImage(_ name: String) -> NSImage? {
-        if #available(macOS 11.0, *) {
-            let image = NSImage(systemSymbolName: name, accessibilityDescription: "StretchReminder")
-            image?.isTemplate = true
-            return image
+    /// Walking figure: green when reminders are on, system gray when they are off.
+    private func statusImage(active: Bool) -> NSImage? {
+        guard #available(macOS 11.0, *) else { return nil }
+        guard let base = NSImage(systemSymbolName: "figure.walk", accessibilityDescription: "StretchReminder") else {
+            return nil
         }
-        return nil
+        let configuration = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+        let symbol = base.withSymbolConfiguration(configuration) ?? base
+        if !active {
+            // A template image shown "disabled" is the standard dimmed gray of the menu bar.
+            symbol.isTemplate = true
+            return symbol
+        }
+        let green = NSColor.systemGreen
+        let tinted = NSImage(size: symbol.size, flipped: false) { rect in
+            symbol.draw(in: rect)
+            green.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        tinted.isTemplate = false
+        return tinted
     }
 
     private func refreshStatusItem(checkFocus: Bool) {
         guard let item = statusItem else { return }
-        var symbol = "figure.walk"
+        let active = pausedUntil == nil
         var text = ""
         if let until = pausedUntil {
-            symbol = "pause.circle"
             if until == Date.distantFuture {
-                text = "Paused — reminders are off"
+                text = "Off — choose Turn on to start again"
             } else {
                 let formatter = DateFormatter()
                 formatter.dateFormat = "HH:mm"
-                text = "Paused until \(formatter.string(from: until))"
+                text = "Off until \(formatter.string(from: until))"
             }
         } else if !windows.isEmpty {
             text = "On — the reminder is on screen"
         } else if sitting >= Config.interval && !lastPostponeReason.isEmpty {
-            symbol = "hourglass"
-            text = "Waiting — \(lastPostponeReason)"
+            text = "On — waiting: \(lastPostponeReason)"
         } else {
             let sat = Int(sitting / 60)
             let left = max(1, Int(((Config.interval - sitting) / 60).rounded(.up)))
@@ -556,23 +582,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         stateMenuItem?.title = text
-        if symbol != shownSymbol, let button = item.button {
-            if let image = symbolImage(symbol) {
+        let lookKey = active ? "on" : "off"
+        if lookKey != shownSymbol, let button = item.button {
+            if let image = statusImage(active: active) {
                 button.image = image
                 button.title = ""
             } else {
                 button.image = nil
-                button.title = symbol == "figure.walk" ? "Stretch" : "Stretch (paused)"
+                button.title = active ? "Stretch" : "Stretch (off)"
             }
-            shownSymbol = symbol
+            button.appearsDisabled = !active
+            shownSymbol = lookKey
         }
         item.button?.toolTip = "StretchReminder: \(text)"
 
-        let paused = pausedUntil != nil
-        pauseHourItem?.isHidden = paused
-        pauseOpenItem?.isHidden = paused
-        resumeItem?.isHidden = !paused
+        pauseHourItem?.isHidden = !active
+        pauseOpenItem?.isHidden = !active
+        resumeItem?.isHidden = active
         loginMenuItem?.state = LoginItem.isEnabled ? NSControl.StateValue.on : NSControl.StateValue.off
+        lockOffMenuItem?.state = Config.turnOffOnLock ? NSControl.StateValue.on : NSControl.StateValue.off
 
         if checkFocus {
             var blocked = false
@@ -593,7 +621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pausedUntil = until
         sitting = 0
         lastPostponeReason = ""
-        note("Paused from the menu (\(label)).")
+        note("Turned off from the menu (\(label)).")
         refreshStatusItem(checkFocus: false)
     }
 
@@ -602,12 +630,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func pauseIndefinitely() {
-        pauseReminders(until: Date.distantFuture, label: "until turned back on")
+        pauseReminders(until: Date.distantFuture, label: "until turned on again")
     }
 
     @objc private func resumeReminders() {
         pausedUntil = nil
-        note("Resumed from the menu.")
+        note("Turned on from the menu.")
         refreshStatusItem(checkFocus: false)
     }
 
@@ -620,6 +648,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             note("Could not turn on start at login.")
         }
+        refreshStatusItem(checkFocus: false)
+    }
+
+    @objc private func toggleTurnOffOnLock() {
+        let newValue = !Config.turnOffOnLock
+        UserDefaults.standard.set(newValue, forKey: "turnOffOnLock")
+        note("Turn off when the Mac locks or sleeps: \(newValue ? "yes" : "no").")
         refreshStatusItem(checkFocus: false)
     }
 
@@ -665,6 +700,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func systemWillSleep() {
         hideOverlay(completed: false, why: "the Mac is going to sleep")
+        turnOffBecauseAway("the Mac went to sleep")
+    }
+
+    @objc private func screenDidLock() {
+        hideOverlay(completed: false, why: "screen locked")
+        turnOffBecauseAway("the screen was locked")
+    }
+
+    /// Caffeine-style: locking or sleeping switches reminders off until turned on by hand.
+    private func turnOffBecauseAway(_ why: String) {
+        guard Config.turnOffOnLock else { return }
+        if let until = pausedUntil, until == Date.distantFuture { return }
+        pausedUntil = Date.distantFuture
+        sitting = 0
+        lastPostponeReason = ""
+        note("Turned off automatically (\(why)). Turn it on again from the menu bar icon.")
+        refreshStatusItem(checkFocus: false)
     }
 
     // MARK: Sitting timer
@@ -689,10 +741,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             hideOverlay(completed: false, why: "the Mac was asleep")
             resetSitting("the Mac was asleep")
             awaySince = nil
+            turnOffBecauseAway("the Mac was asleep")
             return
         }
 
-        // Paused from the menu: count nothing, show nothing.
+        let locked = screenIsLocked()
+        if locked {
+            hideOverlay(completed: false, why: "screen locked")
+            turnOffBecauseAway("the screen was locked")
+        }
+
+        // Turned off from the menu (or by a lock / sleep): count nothing, show nothing.
         if let until = pausedUntil {
             if now < until {
                 sitting = 0
@@ -700,10 +759,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             pausedUntil = nil
-            note("Pause ended; reminders are on again.")
+            note("The hour is over; reminders are on again.")
         }
 
-        let locked = screenIsLocked()
         let displayOff = displayIsAsleep()
         if locked || displayOff {
             let why = locked ? "screen locked" : "display asleep"
