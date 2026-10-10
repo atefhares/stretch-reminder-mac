@@ -326,9 +326,42 @@ func currentFocus() -> FocusState {
     return .off
 }
 
+/// "com.brave.Browser.helper" -> "Brave Browser". Falls back to the identifier itself.
+func appDisplayName(_ bundleID: String) -> String {
+    var candidate = bundleID
+    if let helper = bundleID.range(of: ".helper", options: [.caseInsensitive]) {
+        candidate = String(bundleID[..<helper.lowerBound])
+    }
+    for _ in 0..<4 {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: candidate) {
+            var name = FileManager.default.displayName(atPath: url.path)
+            if name.hasSuffix(".app") { name = String(name.dropLast(4)) }
+            if !name.isEmpty { return name }
+        }
+        guard let dot = candidate.lastIndex(of: ".") else { break }
+        candidate = String(candidate[..<dot])
+        if !candidate.contains(".") { break }
+    }
+    return bundleID
+}
+
+/// One plain sentence for the menu: what is being detected right now and what it means.
+func friendlyWaitLine() -> String? {
+    if let app = microphoneUser() {
+        return "In a call (\(appDisplayName(app))) — the reminder will wait until it ends"
+    }
+    if cameraInUse() {
+        return "Camera is on — the reminder will wait until it is off"
+    }
+    if case .on(let mode) = currentFocus() {
+        return "Focus is on (\(mode)) — the reminder will wait until it is off"
+    }
+    return nil
+}
+
 /// Why a due reminder should wait, or nil when it is fine to show it.
 func postponeReason() -> String? {
-    if let app = microphoneUser() { return "microphone in use by \(app) (call / meeting)" }
+    if let app = microphoneUser() { return "microphone in use by \(appDisplayName(app)) (call / meeting)" }
     if cameraInUse() { return "camera in use (call / meeting)" }
     if case .on(let mode) = currentFocus() { return "Focus is on: \(mode)" }
     return nil
@@ -671,7 +704,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if !windows.isEmpty {
             text = "On — the reminder is on screen"
         } else if sitting >= Config.interval && !lastPostponeReason.isEmpty {
-            text = "On — waiting: \(lastPostponeReason)"
+            text = "On — a reminder is due and waiting"
             barText = "wait"
         } else {
             let remaining = max(0, Int((Config.interval - sitting).rounded(.up)))
@@ -716,8 +749,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             focusWarningItem?.isHidden = !blocked
 
             // Tell at a glance whether a call / Focus is being seen right now.
-            if active, let reason = postponeReason() {
-                nowMenuItem?.title = "Right now reminders wait: \(reason)"
+            if active, let line = friendlyWaitLine() {
+                nowMenuItem?.title = line
                 nowMenuItem?.isHidden = false
             } else {
                 nowMenuItem?.isHidden = true
