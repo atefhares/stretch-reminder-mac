@@ -322,6 +322,76 @@ func postponeReason() -> String? {
     return nil
 }
 
+/// Runs a small command-line tool and returns what it printed (nil on failure or timeout).
+func runTool(_ path: String, _ arguments: [String], timeout: TimeInterval) -> String? {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: path)
+    task.arguments = arguments
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.standardError = FileHandle.nullDevice
+    do {
+        try task.run()
+    } catch {
+        return nil
+    }
+    let deadline = Date().addingTimeInterval(timeout)
+    while task.isRunning && Date() < deadline {
+        usleep(20_000)
+    }
+    if task.isRunning {
+        task.terminate()
+        return nil
+    }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    return String(data: data, encoding: .utf8)
+}
+
+/// One log line describing everything the detectors see right now (for troubleshooting).
+func detectorSnapshot() -> String {
+    var parts: [String] = []
+    parts.append("mic=" + (microphoneUser() ?? "free"))
+    parts.append("camera=" + (cameraInUse() ? "in use" : "free"))
+    switch currentFocus() {
+    case .off: parts.append("focus=off")
+    case .on(let mode): parts.append("focus=on(" + mode + ")")
+    case .unknown: parts.append("focus=unreadable")
+    }
+
+    // Every app that has audio running, and in which direction.
+    var clients: [String] = []
+    for process in audioObjectList(AudioSystem.object, "prs#") ?? [] {
+        let input = (audioNumber(process, "piri") ?? 0) != 0
+        let output = (audioNumber(process, "piro") ?? 0) != 0
+        if !input && !output { continue }
+        var name = audioString(process, "pbid") ?? ""
+        if name.isEmpty { name = "pid " + String(audioNumber(process, "ppid") ?? 0) }
+        var direction = ""
+        if input && output {
+            direction = "in+out"
+        } else if input {
+            direction = "in"
+        } else {
+            direction = "out"
+        }
+        clients.append(name + "[" + direction + "]")
+    }
+    parts.append("audio=" + (clients.isEmpty ? "none" : clients.joined(separator: ", ")))
+
+    // What apps told macOS they are doing (calls and playback keep the Mac awake).
+    var assertions: [String] = []
+    if let output = runTool("/usr/bin/pmset", ["-g", "assertions"], timeout: 2) {
+        for rawLine in output.components(separatedBy: "\n") {
+            guard rawLine.contains("named:") else { continue }
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            assertions.append(String(line.prefix(170)))
+            if assertions.count >= 25 { break }
+        }
+    }
+    parts.append("assertions=" + (assertions.isEmpty ? "none" : assertions.joined(separator: " | ")))
+    return parts.joined(separator: "; ")
+}
+
 func printStatus() {
     func yesNo(_ value: Bool) -> String { value ? "yes" : "no" }
     switch currentFocus() {
@@ -443,6 +513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var shownSymbol = ""
     private var stateMenuItem: NSMenuItem?
+    private var nowMenuItem: NSMenuItem?
     private var focusWarningItem: NSMenuItem?
     private var pauseHourItem: NSMenuItem?
     private var pauseOpenItem: NSMenuItem?
@@ -513,6 +584,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.isEnabled = false
         menu.addItem(state)
         stateMenuItem = state
+        let nowLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        nowLine.isEnabled = false
+        nowLine.isHidden = true
+        menu.addItem(nowLine)
+        nowMenuItem = nowLine
         focusWarningItem = addMenuItem(menu, "Focus is not detected — open Full Disk Access…", #selector(openFullDiskAccess))
 
         menu.addItem(NSMenuItem.separator())
@@ -606,6 +682,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var blocked = false
             if case .unknown = currentFocus() { blocked = true }
             focusWarningItem?.isHidden = !blocked
+
+            // Tell at a glance whether a call / Focus is being seen right now.
+            if active, let reason = postponeReason() {
+                nowMenuItem?.title = "Right now reminders wait: \(reason)"
+                nowMenuItem?.isHidden = false
+            } else {
+                nowMenuItem?.isHidden = true
+            }
         }
     }
 
@@ -614,7 +698,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showNow() {
-        showOverlay()
+        note("Show reminder now: " + detectorSnapshot())
+        guard let reason = postponeReason() else {
+            showOverlay()
+            return
+        }
+        // Same rule as a real reminder: not during a call or a Focus.
+        note("Show reminder now: not shown (\(reason)).")
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "No reminder right now"
+        alert.informativeText = "Reminders are waiting because: \(reason).\n\nThe reminder shows by itself within a minute after that ends."
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Show it anyway")
+        if alert.runModal() == .alertSecondButtonReturn {
+            showOverlay()
+        }
     }
 
     private func pauseReminders(until: Date, label: String) {
