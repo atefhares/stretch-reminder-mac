@@ -16,6 +16,7 @@
 //   defaults write local.stretch-reminder message -string "..."
 //   defaults write local.stretch-reminder checkFocusSchedules -bool false
 //   defaults write local.stretch-reminder turnOffOnLock -bool false
+//   defaults write local.stretch-reminder showCountdownInMenuBar -bool false
 //
 // It shows an icon in the menu bar: green = on, gray = off. The menu turns it
 // on or off, shows a reminder now, switches "Start at login", and quits.
@@ -59,6 +60,11 @@ enum Config {
         guard UserDefaults.standard.object(forKey: "checkFocusSchedules") != nil else { return true }
         return UserDefaults.standard.bool(forKey: "checkFocusSchedules")
     }
+    /// Show the time left until the next reminder next to the menu bar icon.
+    static var showCountdownInMenuBar: Bool {
+        guard UserDefaults.standard.object(forKey: "showCountdownInMenuBar") != nil else { return true }
+        return UserDefaults.standard.bool(forKey: "showCountdownInMenuBar")
+    }
     /// Switch off when the screen locks or the Mac sleeps, until turned on again by hand.
     static var turnOffOnLock: Bool {
         guard UserDefaults.standard.object(forKey: "turnOffOnLock") != nil else { return true }
@@ -71,7 +77,7 @@ enum Config {
     static let idleAwaySeconds: TimeInterval = 300
     /// When a reminder is due but postponed, look again this often.
     static let recheckSeconds: TimeInterval = 60
-    static let tickSeconds: TimeInterval = 5
+    static let tickSeconds: TimeInterval = 1
 
     static let pauseScript = """
     ObjC.import('Foundation');
@@ -520,6 +526,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var resumeItem: NSMenuItem?
     private var loginMenuItem: NSMenuItem?
     private var lockOffMenuItem: NSMenuItem?
+    private var countdownMenuItem: NSMenuItem?
 
     init(testMode: Bool) {
         self.testMode = testMode
@@ -560,6 +567,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastTick = Date()
         let timer = Timer(timeInterval: Config.tickSeconds, target: self,
                           selector: #selector(tick), userInfo: nil, repeats: true)
+        timer.tolerance = 0.1
         RunLoop.main.add(timer, forMode: .common)
         tickTimer = timer
     }
@@ -600,12 +608,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem.separator())
         loginMenuItem = addMenuItem(menu, "Start at login", #selector(toggleStartAtLogin))
         lockOffMenuItem = addMenuItem(menu, "Turn off when the Mac locks or sleeps", #selector(toggleTurnOffOnLock))
+        countdownMenuItem = addMenuItem(menu, "Show countdown in menu bar", #selector(toggleCountdownInMenuBar))
         addMenuItem(menu, "Open log", #selector(openLog))
 
         menu.addItem(NSMenuItem.separator())
         addMenuItem(menu, "Uninstall StretchReminder…", #selector(uninstallApp))
         addMenuItem(menu, "Quit StretchReminder", #selector(quitApp))
 
+        // Digits of equal width, so the countdown does not make the icon jump around.
+        item.button?.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
         item.menu = menu
         statusItem = item
         refreshStatusItem(checkFocus: true)
@@ -639,6 +650,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let item = statusItem else { return }
         let active = pausedUntil == nil
         var text = ""
+        var barText = ""
         if let until = pausedUntil {
             if until == Date.distantFuture {
                 text = "Off — choose Turn on to start again"
@@ -651,24 +663,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             text = "On — the reminder is on screen"
         } else if sitting >= Config.interval && !lastPostponeReason.isEmpty {
             text = "On — waiting: \(lastPostponeReason)"
+            barText = "wait"
         } else {
-            let sat = Int(sitting / 60)
-            let left = max(1, Int(((Config.interval - sitting) / 60).rounded(.up)))
-            text = "On — sitting \(sat) min, reminder in \(left) min"
+            let remaining = max(0, Int((Config.interval - sitting).rounded(.up)))
+            let clock = String(format: "%d:%02d", remaining / 60, remaining % 60)
+            text = "On — next reminder in \(clock)"
+            barText = clock
         }
 
         stateMenuItem?.title = text
+        if !Config.showCountdownInMenuBar { barText = "" }
         let lookKey = active ? "on" : "off"
-        if lookKey != shownSymbol, let button = item.button {
-            if let image = statusImage(active: active) {
-                button.image = image
-                button.title = ""
-            } else {
-                button.image = nil
-                button.title = active ? "Stretch" : "Stretch (off)"
+        if let button = item.button {
+            if lookKey != shownSymbol {
+                button.image = statusImage(active: active)
+                button.appearsDisabled = !active
+                shownSymbol = lookKey
             }
-            button.appearsDisabled = !active
-            shownSymbol = lookKey
+            var title = ""
+            if button.image == nil {
+                // No symbol available on this macOS: fall back to words.
+                title = active ? "Stretch" : "Stretch (off)"
+                if !barText.isEmpty { title += " " + barText }
+            } else if !barText.isEmpty {
+                title = " " + barText
+            }
+            if button.title != title { button.title = title }
+            let position: NSControl.ImagePosition = title.isEmpty ? .imageOnly : .imageLeading
+            if button.imagePosition != position { button.imagePosition = position }
         }
         item.button?.toolTip = "StretchReminder: \(text)"
 
@@ -677,6 +699,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         resumeItem?.isHidden = active
         loginMenuItem?.state = LoginItem.isEnabled ? NSControl.StateValue.on : NSControl.StateValue.off
         lockOffMenuItem?.state = Config.turnOffOnLock ? NSControl.StateValue.on : NSControl.StateValue.off
+        countdownMenuItem?.state = Config.showCountdownInMenuBar ? NSControl.StateValue.on : NSControl.StateValue.off
 
         if checkFocus {
             var blocked = false
@@ -747,6 +770,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             note("Could not turn on start at login.")
         }
+        refreshStatusItem(checkFocus: false)
+    }
+
+    @objc private func toggleCountdownInMenuBar() {
+        UserDefaults.standard.set(!Config.showCountdownInMenuBar, forKey: "showCountdownInMenuBar")
         refreshStatusItem(checkFocus: false)
     }
 
