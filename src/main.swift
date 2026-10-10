@@ -16,8 +16,14 @@
 //   defaults write local.stretch-reminder message -string "..."
 //   defaults write local.stretch-reminder checkFocusSchedules -bool false
 //
-// Flags:  --test   show the screen once right now, then exit
-//         --status print what the detectors currently see, then exit
+// It shows an icon in the menu bar (walking figure = on, pause = paused,
+// hourglass = a reminder is waiting for a call / Focus to end) with a menu to
+// pause, show a reminder now, switch "Start at login" on or off, and quit.
+//
+// Flags:  --test           show the screen once right now, then exit
+//         --status         print what the detectors currently see, then exit
+//         --enable-login   write the start-at-login entry, then exit
+//         --disable-login  remove the start-at-login entry, then exit
 
 import AppKit
 import CoreAudio
@@ -333,6 +339,58 @@ func printStatus() {
     }
 }
 
+// MARK: - Start at login (a LaunchAgent in the user's Library)
+
+enum LoginItem {
+    static let label = "local.stretch-reminder"
+
+    static var plistPath: String {
+        return NSHomeDirectory() + "/Library/LaunchAgents/" + label + ".plist"
+    }
+
+    static var isEnabled: Bool {
+        return FileManager.default.fileExists(atPath: plistPath)
+    }
+
+    /// Start at every login, and restart only if it crashes (so Quit really quits).
+    static func enable() -> Bool {
+        guard let executable = Bundle.main.executablePath else { return false }
+        let keepAlive: [String: Any] = ["SuccessfulExit": false]
+        let plist: [String: Any] = [
+            "Label": label,
+            "ProgramArguments": [executable],
+            "RunAtLoad": true,
+            "KeepAlive": keepAlive,
+            "ProcessType": "Interactive",
+            "LimitLoadToSessionType": "Aqua",
+            "StandardErrorPath": NSHomeDirectory() + "/Library/Logs/StretchReminder.stderr.log"
+        ]
+        let directory = NSHomeDirectory() + "/Library/LaunchAgents"
+        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: nil)
+        guard let data = try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0) else {
+            return false
+        }
+        return FileManager.default.createFile(atPath: plistPath, contents: data, attributes: nil)
+    }
+
+    static func disable() {
+        try? FileManager.default.removeItem(atPath: plistPath)
+    }
+}
+
+/// Only one background copy may run. Returns false when another one already holds the lock.
+func acquireSingleInstanceLock() -> Bool {
+    let directory = NSHomeDirectory() + "/Library/Caches"
+    try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: nil)
+    let descriptor = open(directory + "/local.stretch-reminder.lock", O_CREAT | O_RDWR, 0o600)
+    if descriptor < 0 { return true } // cannot check; carry on
+    if flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
+        close(descriptor)
+        return false
+    }
+    return true // the descriptor stays open (and locked) for the life of the process
+}
+
 // MARK: - The blocking window
 
 final class OverlayWindow: NSWindow {
@@ -352,7 +410,7 @@ final class OverlayWindow: NSWindow {
 
 // MARK: - App
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let testMode: Bool
 
     private var sitting: TimeInterval = 0
@@ -372,6 +430,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var countdownTimer: Timer?
     private var pauseTask: Process?
     private var activity: NSObjectProtocol?
+
+    private var pausedUntil: Date?
+    private var statusItem: NSStatusItem?
+    private var shownSymbol = ""
+    private var stateMenuItem: NSMenuItem?
+    private var focusWarningItem: NSMenuItem?
+    private var pauseHourItem: NSMenuItem?
+    private var pauseOpenItem: NSMenuItem?
+    private var resumeItem: NSMenuItem?
+    private var loginMenuItem: NSMenuItem?
 
     init(testMode: Bool) {
         self.testMode = testMode
@@ -404,11 +472,191 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self, selector: #selector(systemWillSleep),
             name: NSWorkspace.willSleepNotification, object: nil)
 
+        setUpStatusItem()
+
         lastTick = Date()
         let timer = Timer(timeInterval: Config.tickSeconds, target: self,
                           selector: #selector(tick), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .common)
         tickTimer = timer
+    }
+
+    // MARK: Menu bar icon
+
+    @discardableResult
+    private func addMenuItem(_ menu: NSMenu, _ title: String, _ action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        return item
+    }
+
+    private func setUpStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = self
+
+        let state = NSMenuItem(title: "StretchReminder", action: nil, keyEquivalent: "")
+        state.isEnabled = false
+        menu.addItem(state)
+        stateMenuItem = state
+        focusWarningItem = addMenuItem(menu, "Focus is not detected — open Full Disk Access…", #selector(openFullDiskAccess))
+
+        menu.addItem(NSMenuItem.separator())
+        addMenuItem(menu, "Show reminder now", #selector(showNow))
+        pauseHourItem = addMenuItem(menu, "Pause for 1 hour", #selector(pauseOneHour))
+        pauseOpenItem = addMenuItem(menu, "Pause until I turn it back on", #selector(pauseIndefinitely))
+        resumeItem = addMenuItem(menu, "Resume reminders", #selector(resumeReminders))
+
+        menu.addItem(NSMenuItem.separator())
+        loginMenuItem = addMenuItem(menu, "Start at login", #selector(toggleStartAtLogin))
+        addMenuItem(menu, "Open log", #selector(openLog))
+
+        menu.addItem(NSMenuItem.separator())
+        addMenuItem(menu, "Uninstall StretchReminder…", #selector(uninstallApp))
+        addMenuItem(menu, "Quit StretchReminder", #selector(quitApp))
+
+        item.menu = menu
+        statusItem = item
+        refreshStatusItem(checkFocus: true)
+    }
+
+    private func symbolImage(_ name: String) -> NSImage? {
+        if #available(macOS 11.0, *) {
+            let image = NSImage(systemSymbolName: name, accessibilityDescription: "StretchReminder")
+            image?.isTemplate = true
+            return image
+        }
+        return nil
+    }
+
+    private func refreshStatusItem(checkFocus: Bool) {
+        guard let item = statusItem else { return }
+        var symbol = "figure.walk"
+        var text = ""
+        if let until = pausedUntil {
+            symbol = "pause.circle"
+            if until == Date.distantFuture {
+                text = "Paused — reminders are off"
+            } else {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "HH:mm"
+                text = "Paused until \(formatter.string(from: until))"
+            }
+        } else if !windows.isEmpty {
+            text = "On — the reminder is on screen"
+        } else if sitting >= Config.interval && !lastPostponeReason.isEmpty {
+            symbol = "hourglass"
+            text = "Waiting — \(lastPostponeReason)"
+        } else {
+            let sat = Int(sitting / 60)
+            let left = max(1, Int(((Config.interval - sitting) / 60).rounded(.up)))
+            text = "On — sitting \(sat) min, reminder in \(left) min"
+        }
+
+        stateMenuItem?.title = text
+        if symbol != shownSymbol, let button = item.button {
+            if let image = symbolImage(symbol) {
+                button.image = image
+                button.title = ""
+            } else {
+                button.image = nil
+                button.title = symbol == "figure.walk" ? "Stretch" : "Stretch (paused)"
+            }
+            shownSymbol = symbol
+        }
+        item.button?.toolTip = "StretchReminder: \(text)"
+
+        let paused = pausedUntil != nil
+        pauseHourItem?.isHidden = paused
+        pauseOpenItem?.isHidden = paused
+        resumeItem?.isHidden = !paused
+        loginMenuItem?.state = LoginItem.isEnabled ? NSControl.StateValue.on : NSControl.StateValue.off
+
+        if checkFocus {
+            var blocked = false
+            if case .unknown = currentFocus() { blocked = true }
+            focusWarningItem?.isHidden = !blocked
+        }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        refreshStatusItem(checkFocus: true)
+    }
+
+    @objc private func showNow() {
+        showOverlay()
+    }
+
+    private func pauseReminders(until: Date, label: String) {
+        pausedUntil = until
+        sitting = 0
+        lastPostponeReason = ""
+        note("Paused from the menu (\(label)).")
+        refreshStatusItem(checkFocus: false)
+    }
+
+    @objc private func pauseOneHour() {
+        pauseReminders(until: Date().addingTimeInterval(3600), label: "for 1 hour")
+    }
+
+    @objc private func pauseIndefinitely() {
+        pauseReminders(until: Date.distantFuture, label: "until turned back on")
+    }
+
+    @objc private func resumeReminders() {
+        pausedUntil = nil
+        note("Resumed from the menu.")
+        refreshStatusItem(checkFocus: false)
+    }
+
+    @objc private func toggleStartAtLogin() {
+        if LoginItem.isEnabled {
+            LoginItem.disable()
+            note("Start at login turned off.")
+        } else if LoginItem.enable() {
+            note("Start at login turned on.")
+        } else {
+            note("Could not turn on start at login.")
+        }
+        refreshStatusItem(checkFocus: false)
+    }
+
+    @objc private func openLog() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/StretchReminder.log"))
+    }
+
+    @objc private func openFullDiskAccess() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func quitApp() {
+        note("Quit from the menu.")
+        NSApp.terminate(nil)
+    }
+
+    @objc private func uninstallApp() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Uninstall StretchReminder?"
+        alert.informativeText = "This stops the reminders, removes the start-at-login entry and moves the app to the Trash."
+        alert.addButton(withTitle: "Uninstall")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        LoginItem.disable()
+        if let domain = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: domain)
+        }
+        note("Uninstalled from the menu.")
+        let bundleURL = Bundle.main.bundleURL
+        if bundleURL.pathExtension == "app" {
+            try? FileManager.default.trashItem(at: bundleURL, resultingItemURL: nil)
+        }
+        NSApp.terminate(nil)
     }
 
     @objc private func showTestOverlay() {
@@ -431,6 +679,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func tick() {
+        defer { refreshStatusItem(checkFocus: false) }
         let now = Date()
         let delta = now.timeIntervalSince(lastTick)
         lastTick = now
@@ -441,6 +690,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             resetSitting("the Mac was asleep")
             awaySince = nil
             return
+        }
+
+        // Paused from the menu: count nothing, show nothing.
+        if let until = pausedUntil {
+            if now < until {
+                sitting = 0
+                awaySince = nil
+                return
+            }
+            pausedUntil = nil
+            note("Pause ended; reminders are on again.")
         }
 
         let locked = screenIsLocked()
@@ -664,8 +924,22 @@ if launchArguments.contains("--status") {
     exit(0)
 }
 
+if launchArguments.contains("--enable-login") {
+    exit(LoginItem.enable() ? 0 : 1)
+}
+if launchArguments.contains("--disable-login") {
+    LoginItem.disable()
+    exit(0)
+}
+
+let isTestRun = launchArguments.contains("--test")
+if !isTestRun && !acquireSingleInstanceLock() {
+    // Another copy is already running in the background.
+    exit(0)
+}
+
 let application = NSApplication.shared
-let appDelegate = AppDelegate(testMode: launchArguments.contains("--test"))
+let appDelegate = AppDelegate(testMode: isTestRun)
 application.delegate = appDelegate
 application.setActivationPolicy(.accessory)
 application.run()
