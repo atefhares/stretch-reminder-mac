@@ -20,6 +20,18 @@ It is deliberately polite about interrupting: it waits while you are in a call
 or a meeting, while a Focus / Do Not Disturb is on, and while the Mac is locked
 or asleep.
 
+<p align="center">
+  <img src="docs/screenshots/reminder.png" width="760" alt="The reminder screen: a dark full-screen message with a countdown and a button">
+</p>
+<p align="center"><em>The reminder screen, with the default message. It dims everything behind it almost to black.</em></p>
+
+<p align="center">
+  <img src="docs/screenshots/menu-on.png" width="300" alt="The menu while reminders are on, with a green icon and a countdown">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/menu-off.png" width="300" alt="The menu while reminders are off, with a gray icon">
+</p>
+<p align="center"><em>The menu: a green icon while it is on, gray while it is off.</em></p>
+
 ## Contents
 
 - [What it does](#what-it-does)
@@ -66,23 +78,17 @@ Intel Macs and other macOS versions are welcome.
 
 ## Install
 
-### From a release
-
-1. Download `install-stretch-reminder.sh` from the
-   [latest release](../../releases/latest).
-2. In Terminal, run:
-
-   ```
-   bash ~/Downloads/install-stretch-reminder.sh
-   ```
-
-### From source
+In Terminal:
 
 ```
-git clone <the URL of this repository>
-cd StretchReminder
+git clone https://github.com/atefhares/stretch-reminder-mac.git
+cd stretch-reminder-mac
 bash build.sh install
 ```
+
+If the [releases page](../../releases) has a release, you can instead download
+`install-stretch-reminder.sh` from it and run
+`bash ~/Downloads/install-stretch-reminder.sh`.
 
 Either way the installer:
 
@@ -133,7 +139,8 @@ Click the menu bar icon:
 
 If you quit it, open StretchReminder from Applications to start it again.
 
-The installer file is also a small command-line tool:
+The installer file is also a small command-line tool. If you installed from
+source, it is at `dist/install-stretch-reminder.sh`.
 
 ```
 bash install-stretch-reminder.sh test       # act as if a reminder is due now
