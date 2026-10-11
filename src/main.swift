@@ -999,7 +999,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSAttributedString.Key.font: NSFont.systemFont(ofSize: 12),
             NSAttributedString.Key.foregroundColor: NSColor.labelColor
         ])
-        NSApp.orderFrontStandardAboutPanel(options: [NSApplication.AboutPanelOptionKey.credits: credits])
+        // An empty build number leaves just "Version 1.8", without a second number in parentheses.
+        let options: [NSApplication.AboutPanelOptionKey: Any] = [
+            NSApplication.AboutPanelOptionKey.credits: credits,
+            NSApplication.AboutPanelOptionKey.version: ""
+        ]
+        NSApp.orderFrontStandardAboutPanel(options: options)
     }
 
     @objc private func toggleCountdownInMenuBar() {

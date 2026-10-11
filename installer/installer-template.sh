@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-# The name shown as owner in the app's About window. Change it here if you like.
+# The name shown as owner in the app's About window.
 OWNER_NAME="Atef Hares"
 
 LABEL="local.stretch-reminder"
@@ -238,8 +238,8 @@ cat > "$STAGED/Contents/Info.plist" <<PLIST_END
   <key>CFBundleDisplayName</key><string>StretchReminder</string>
   <key>CFBundleExecutable</key><string>StretchReminder</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.7</string>
-  <key>CFBundleVersion</key><string>8</string>
+  <key>CFBundleShortVersionString</key><string>1.8</string>
+  <key>CFBundleVersion</key><string>9</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSHumanReadableCopyright</key><string>© $(date +%Y) $OWNER_NAME</string>
   <key>StretchReminderOwner</key><string>$OWNER_NAME</string>
