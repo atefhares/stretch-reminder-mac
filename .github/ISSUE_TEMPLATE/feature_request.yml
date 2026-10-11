@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest something new or a change to how it works
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the situation, not only the change. There may be a simpler way to get there.
+      placeholder: "Example: I use two Macs and want the same reminder settings on both."
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything you tried instead?
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Before you send
+      options:
+        - label: I understand the app makes no network connections, and this request does not need one.
+          required: false
+        - label: I would be willing to help build or test this.
+          required: false

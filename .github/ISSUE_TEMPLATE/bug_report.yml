@@ -1,0 +1,86 @@
+name: Bug report
+description: Something does not work the way it should
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report this.
+        The log and the status output contain the names of apps that were using audio on your Mac. Please read them before pasting and remove anything you would rather not share.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: "Example: I was in a Zoom meeting with my microphone muted and the reminder still appeared."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: If you can make it happen again, how?
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: false
+  - type: input
+    id: app-version
+    attributes:
+      label: StretchReminder version
+      description: Menu bar icon > About StretchReminder
+      placeholder: "1.8"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: Apple menu > About This Mac
+      placeholder: "macOS 15.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: mac-type
+    attributes:
+      label: Mac type
+      options:
+        - Apple Silicon
+        - Intel
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part is it about?
+      multiple: true
+      options:
+        - Installing or updating
+        - The reminder screen
+        - Call or meeting detection
+        - Focus / Do Not Disturb detection
+        - Lock or sleep behaviour
+        - Pausing music or video
+        - The menu bar icon or menu
+        - Something else
+    validations:
+      required: false
+  - type: textarea
+    id: status
+    attributes:
+      label: Status output
+      description: The output of `bash install-stretch-reminder.sh status`, taken while the problem is happening if possible.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: The last 20 to 30 lines of the log (menu bar icon > Open log), or the compiler output if the build failed.
+      render: text
+    validations:
+      required: false

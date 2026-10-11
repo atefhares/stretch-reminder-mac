@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8
+- About window shows just "Version 1.8", without a second number in parentheses
+  (that number was the internal build number).
+- Open-source housekeeping: MIT license, a fuller README, how-it-works and
+  contributing guides, security policy, issue and pull request templates.
+
 ## 1.7
 - Menu: "Remind me every" (15, 20, 30, 45, 60, 90 minutes, or any number from 1 to 240).
   Changing it restarts the count.
